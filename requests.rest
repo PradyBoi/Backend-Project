@@ -1,0 +1,1 @@
+GET http://localhost:3000/quotes?page=2&limit=5
