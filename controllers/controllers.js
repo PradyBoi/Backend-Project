@@ -6,7 +6,7 @@ const sendEmail = require('./../email');
 
 const signToken = (id) => {
   return jwt.sign({ id: id }, process.env.SECRET, {
-    expiresIn: '1d',
+    expiresIn: '30000',
   });
 };
 
@@ -121,7 +121,6 @@ exports.registerNewUser = async (req, res) => {
       }
     }
 
-    // *******************Call strongPassword() here************************
     const string = await strongPassword(
       newUser.password,
       newUser.passwordConfirm
@@ -153,6 +152,10 @@ exports.registerNewUser = async (req, res) => {
       ]);
     } catch (err) {
       if (err) console.log(err);
+      return res.status(500).json({
+        status: 'Internal server error',
+        message: 'There was an error sending the email. Try again later!',
+      });
     }
 
     // Getting new Access & Refresh Token
@@ -194,15 +197,11 @@ exports.login = async (req, res) => {
   }
 
   const resultVal = await con.query_prom(
-    `SELECT Name, Email, Password, userID, salt FROM users WHERE Email ='${userEmail}'`
+    'SELECT Name, Email, Password, userID, salt FROM users WHERE Email=?',
+    [userEmail]
   );
 
   const [filterResults] = JSON.parse(JSON.stringify(resultVal));
-
-  // const hashed = await bcrypt.hash(userPassword, filterResults.salt);
-
-  // console.log(hashed);
-  // console.log(filterResults.Password);
 
   if (
     !filterResults ||
@@ -216,6 +215,29 @@ exports.login = async (req, res) => {
       status: 'Bad request',
       message: 'Incorrect email or password',
     });
+
+  const [{ requestCounter, requestCounterExpires }] = await con.query_prom(
+    'SELECT requestCounter, requestCounterExpires FROM users WHERE userID=?',
+    [filterResults.userID]
+  );
+
+  const expiryDate = new Date(requestCounterExpires);
+
+  // CHECK if user has exceeded the login limit and 24 hours has passed.
+  if (requestCounter === 1 && expiryDate.getTime() > Date.now()) {
+    return res.status(401).json({
+      status: 'Forbidden',
+      message:
+        'You have exceed the maximum limit allowed to login. Try again after 24 hours, or reset password',
+    });
+  }
+  if (req.rateLimit.limit === req.rateLimit.current) {
+    // When user exceeds login attempts, SET requestCounter = 1 in SQL
+    await con.query_prom(
+      'UPDATE users SET requestCounter=?, requestCounterExpires=? WHERE userID=?',
+      [1, new Date(Date.now() + 24 * 60 * 60 * 1000), filterResults.userID]
+    );
+  }
 
   const token = signToken(filterResults.userID);
   const refToken = refreshTokenFun(filterResults.userID);
@@ -437,7 +459,7 @@ exports.forgotPassword = async (req, res, next) => {
       [passwordResetToken, passwordResetExpires, filterResults.Email]
     );
   } catch (err) {
-    console.log(err);
+    if (err) console.log(err);
     return res.status(500).json({
       status: 'Internal server error',
       message: 'There was an error sending the email. Try again later!',
@@ -463,7 +485,6 @@ const createResetPasswordToken = async function (Email) {
 };
 
 exports.resetPassword = async (req, res, next) => {
-  // try {
   const hashedToken = crypto
     .createHash('sha256')
     .update(req.params.token)
@@ -471,7 +492,6 @@ exports.resetPassword = async (req, res, next) => {
 
   // 1. Getting user based on tokens
 
-  // queryResult = [] : when (NO DATA), queryResult = [asdfasdf] : when [DATA];
   const resultVal = await con.query_prom(
     'SELECT userID, passwordResetExpires, Password, salt FROM users WHERE passwordResetToken=?',
     [hashedToken]
@@ -479,10 +499,7 @@ exports.resetPassword = async (req, res, next) => {
 
   const [filterResults] = JSON.parse(JSON.stringify(resultVal));
 
-  console.log(new Date());
-  console.log(filterResults);
-  // console.log(JSON.parse(filterResults.passwordResetExpires));
-
+  // 1.) If the token DOES NOT exists in DB
   if (!filterResults) {
     return res.status(400).json({
       status: 'fail',
@@ -491,9 +508,17 @@ exports.resetPassword = async (req, res, next) => {
   }
 
   const hashed = await bcrypt.hash(req.body.Password, filterResults.salt);
+  const date = new Date(filterResults.passwordResetExpires);
 
+  if (req.body.Password !== req.body.PasswordConfirm) {
+    return res.status(400).json({
+      status: 'fail',
+      message: 'Password does not match. Please try again!',
+    });
+  }
   if (hashed === filterResults.Password) {
-    return res.status(200).json({
+    // if the new password is the same as old one
+    return res.status(400).json({
       status: 'fail',
       message:
         'Old password matches with the new password. Please try enter a new unique password!',
@@ -511,23 +536,30 @@ exports.resetPassword = async (req, res, next) => {
     });
   }
 
+  // 2. If token has not expired, and user exists, then set new password
+  if (!(date.getTime() > Date.now())) {
+    return res.status(400).json({
+      status: 'fail',
+      message: 'Token is invalid or expired (date)',
+    });
+  }
+
+  // 3. Update changedPasswordAt property for the user
   const salt = await bcrypt.genSalt();
   const hashedPassword = await bcrypt.hash(req.body.Password, salt);
-  // 1.)
-  await con.query_prom(
+
+  const queryPro1 = con.query_prom(
     'UPDATE users SET Password=?, salt=?, passwordResetToken=?, passwordResetExpires=? WHERE passwordResetToken=?',
     [hashedPassword, salt, null, null, hashedToken]
   );
 
-  // 2. If token has not expired, and user exists, then set new password
-  // if (!(filterResults.passwordResetExpires.getTime() > Date.now())) {
-  //   return res.status(400).json({
-  //     status: 'fail',
-  //     message: 'Token is invalid or expired',
-  //   });
-  // }
+  const queryPro2 = con.query_prom(
+    'UPDATE users SET requestCounter=?, requestCounterExpires=? WHERE userID=?',
+    [null, null, filterResults.userID]
+  );
 
-  // 3. Update changedPasswordAt property for the user
+  await Promise.all([queryPro1, queryPro2]);
+
   // 4. Log in the user, send JWT token
   const jwtToken = signToken(filterResults.userID);
   res.cookie(jwtToken);

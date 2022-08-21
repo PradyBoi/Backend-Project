@@ -31,7 +31,6 @@ module.exports = async function paginatedResults(req, res, next) {
       limit: limit,
     };
   }
-  // console.log(model);
 
   results.results = model.slice(startIndex, endIndex);
 

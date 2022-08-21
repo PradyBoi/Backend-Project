@@ -1,1 +1,21 @@
-[{"id":1,"quotes":"Sometimes it takes only one act of kindness and caring to change a persons life."},{"id":2,"quotes":"Do things for people not because of who they are or what they do in return, but because of who you are."},{"id":3,"quotes":"Carry out a random act of kindness, with no expectation of reward, safe in the knowledge that one day someone might do the same for you."},{"id":4,"quotes":"Because thats what kindness is. Its not doing something for someone else because they cant, but because you can."},{"id":5,"quotes":"Remember theres no such thing as a small act of kindness. Every act creates a ripple with no logical end."},{"id":6,"quotes":"Love and kindness are never wasted. They always make a difference. They bless the one who receives them, and they bless you, the giver."},{"id":7,"quotes":"What wisdom can you find that is greater than kindness?"},{"id":8,"quotes":"You can accomplish by kindness what you cannot by force."},{"id":9,"quotes":"Kindness can become its own motive. We are made kind by being kind."},{"id":10,"quotes":"Human kindness has never weakened the stamina or softened the fiber of a free people. A nation does not have to be cruel to be tough."},{"id":11,"name":"File is written!"}]
+const express = require('express');
+const controllers = require('./controllers/controllers.js');
+
+const paginatedResults = require('./pagination');
+
+const router = express.Router();
+
+router.use(controllers.protect);
+
+router
+  .get('/quotes', paginatedResults, controllers.getQuotes)
+  .post('/quotes', controllers.postQuote);
+
+router.get('/getMyQuotes', controllers.getMyQuotes);
+
+router.post('/getQuotesOfTheUser', controllers.getQuotesOfTheUser);
+
+// Delete Quote
+router.delete('/quotes/:id', controllers.checkId, controllers.deleteQuotes);
+
+module.exports = router;
