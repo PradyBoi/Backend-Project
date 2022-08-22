@@ -1,6 +1,5 @@
 const express = require('express');
 const controllers = require('./controllers/controllers.js');
-
 const rateLimit = require('express-rate-limit');
 
 const router = express.Router();
@@ -13,18 +12,18 @@ const limiter = rateLimit({
 });
 
 //Register User
-router.post('/register', controllers.registerNewUser);
+router.route('/register').post(limiter, controllers.registerNewUser);
 
 // Login User
-router.post('/login', limiter, controllers.login);
+router.route('/login').post(limiter, controllers.login);
 
 // Refresh Token
-router.post('/refresh-token', controllers.refreshToken);
+router.route('/refresh-token').post(controllers.refreshToken);
 
 // Logout User
-router.post('/forgotPassword', controllers.forgotPassword);
+router.route('/forgotPassword').post(controllers.forgotPassword);
 
 // Reset Password
-router.patch('/resetPassword/:token', controllers.resetPassword);
+router.route('/resetPassword/:token').patch(controllers.resetPassword);
 
 module.exports = router;

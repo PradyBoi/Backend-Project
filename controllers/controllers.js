@@ -16,47 +16,14 @@ const refreshTokenFun = (id) => {
   });
 };
 
-const comparePassword = async (enteredPassword, savedPassword, savedSalt) => {
+const passwordDoesNotMatch = async (
+  enteredPassword,
+  savedPassword,
+  savedSalt
+) => {
   const hashedPassword = await bcrypt.hash(enteredPassword, savedSalt);
   if (savedPassword !== hashedPassword) return true;
   return false;
-};
-
-exports.refreshToken = (req, res) => {
-  try {
-    const token = req.cookies.refreshToken;
-
-    if (!token)
-      return res.status(400).json({
-        status: 'fail',
-        message: 'You are not logged in. Please login again.',
-      });
-
-    // TOKEN Verification
-    jwtPayload = jwt.verify(token, process.env.REFRESHTOKEN);
-
-    res.cookie('accessToken', signToken(jwtPayload.id), {
-      httpOnly: true,
-    });
-    res.cookie('refreshToken', refreshTokenFun(jwtPayload.id), {
-      httpOnly: true,
-    });
-
-    return res.status(200).json({
-      status: 'success',
-    });
-  } catch (err) {
-    if (err.name === 'TokenExpiredError')
-      return res.status(401).json({
-        status: 'fail',
-        message: 'Your token has expired!. Please try logging in again.',
-      });
-    if (err.name === 'JsonWebTokenError')
-      return res.status(401).json({
-        status: 'fail',
-        message: 'Invalid token! Please try logging in again.',
-      });
-  }
 };
 
 const getQuotesFun = async (id) => {
@@ -93,27 +60,87 @@ const strongPassword = async (password, passwordConfirm) => {
   }
 };
 
+const createResetPasswordToken = async function (Email) {
+  const resetToken = crypto.randomBytes(32).toString('hex');
+  const passwordResetToken = crypto
+    .createHash('sha256')
+    .update(resetToken)
+    .digest('hex');
+
+  const passwordResetExpires = new Date(Date.now() + 10 * 60 * 1000);
+
+  await con.query_prom(
+    'UPDATE users SET passwordResetToken=?, passwordResetExpires=? WHERE Email=?',
+    [passwordResetToken, passwordResetExpires, Email]
+  );
+
+  return [resetToken, passwordResetToken, passwordResetExpires];
+};
+
+exports.refreshToken = (req, res) => {
+  try {
+    const token = req.cookies.refreshToken;
+
+    if (!token)
+      return res.status(401).json({
+        status: 'fail',
+        message: 'You are not logged in. Please login again.',
+      });
+
+    // TOKEN Verification
+    const { id } = jwt.verify(token, process.env.REFRESHTOKEN);
+
+    res.cookie('accessToken', signToken(id), {
+      httpOnly: true,
+    });
+    res.cookie('refreshToken', refreshTokenFun(id), {
+      httpOnly: true,
+    });
+
+    return res.status(200).json({
+      status: 'success',
+    });
+  } catch (err) {
+    if (err.name === 'TokenExpiredError')
+      return res.status(401).json({
+        status: 'fail',
+        message: 'Your token has expired!. Please try logging in again.',
+      });
+    if (err.name === 'JsonWebTokenError')
+      return res.status(401).json({
+        status: 'fail',
+        message: 'Invalid token! Please try logging in again.',
+      });
+  }
+};
+
+const storeHasedPassword = async (email, password) => {
+  const salt = await bcrypt.genSalt();
+  const hashed = await bcrypt.hash(password, salt);
+
+  await con.query_prom('UPDATE users SET salt=?, Password=? WHERE Email=?', [
+    salt,
+    hashed,
+    email,
+  ]);
+};
+
 exports.registerNewUser = async (req, res) => {
   try {
-    // Getting all info from request body
-    const newUser = {
-      name: req.body.name,
-      email: req.body.email,
-      password: req.body.password,
-      passwordConfirm: req.body.passwordConfirm,
-    };
+    const { name, email, password, passwordConfirm } = req.body;
 
     // Retreiving email from DB
     const queryRes = await con.query_prom(
       'SELECT Email FROM users WHERE Email=?',
-      [newUser.email]
+      [email]
     );
 
-    if (queryRes.length) {
+    // if Email exists
+    if (!(queryRes.length === 0)) {
       const [{ Email }] = JSON.parse(JSON.stringify(queryRes));
 
       // Checking if provided email exists in DB
-      if (Email.toLowerCase() === newUser.email.toLowerCase()) {
+      if (Email.toLowerCase() === email.toLowerCase()) {
         return res.status(400).json({
           status: 'fail',
           message: 'This email is already registered!',
@@ -121,10 +148,8 @@ exports.registerNewUser = async (req, res) => {
       }
     }
 
-    const string = await strongPassword(
-      newUser.password,
-      newUser.passwordConfirm
-    );
+    // if it's a Strong Password
+    const string = await strongPassword(password, passwordConfirm);
 
     if (string) {
       return res.status(400).json({
@@ -132,26 +157,18 @@ exports.registerNewUser = async (req, res) => {
         message: string,
       });
     }
+
     // Registering New User!
     const { insertId: id } = await con.query_prom(
       'INSERT INTO users (Name, Email) VALUES (?,?);',
-      [newUser.name, newUser.email]
+      [name, email]
     );
 
     try {
-      // setting up salt & hashed password
-      const salt = await bcrypt.genSalt();
-      await con.query_prom('UPDATE users SET salt=? WHERE Email=?', [
-        salt,
-        newUser.email,
-      ]);
-      const hashed = await bcrypt.hash(newUser.password, salt);
-      await con.query_prom('UPDATE users SET Password=? WHERE Email=?', [
-        hashed,
-        newUser.email,
-      ]);
+      await storeHasedPassword(email, password);
     } catch (err) {
       if (err) console.log(err);
+
       return res.status(500).json({
         status: 'Internal server error',
         message: 'There was an error sending the email. Try again later!',
@@ -176,18 +193,17 @@ exports.registerNewUser = async (req, res) => {
       message: 'User created!',
     });
   } catch (err) {
-    if (err) {
-      return res.status(500).json({
-        status: 'fail',
-        error: err.message,
-      });
-    }
+    // if (err) {
+    return res.status(500).json({
+      status: 'fail',
+      error: err.message,
+    });
+    // }
   }
 };
 
 exports.login = async (req, res) => {
-  const userEmail = req.body.Email;
-  const userPassword = req.body.Password;
+  const { Email: userEmail, Password: userPassword } = req.body;
 
   if (!userEmail || !userPassword) {
     return res.status(400).json({
@@ -203,9 +219,10 @@ exports.login = async (req, res) => {
 
   const [filterResults] = JSON.parse(JSON.stringify(resultVal));
 
+  // if user DOES NOT exist || password DOES NOT exits, RETURN 'Bad request'
   if (
     !filterResults ||
-    (await comparePassword(
+    (await passwordDoesNotMatch(
       userPassword,
       filterResults.Password,
       filterResults.salt
@@ -231,6 +248,7 @@ exports.login = async (req, res) => {
         'You have exceed the maximum limit allowed to login. Try again after 24 hours, or reset password',
     });
   }
+
   if (req.rateLimit.limit === req.rateLimit.current) {
     // When user exceeds login attempts, SET requestCounter = 1 in SQL
     await con.query_prom(
@@ -254,8 +272,9 @@ exports.login = async (req, res) => {
     message: 'Logged In!',
   });
 };
+// ---------------------------------------DONE---------------------------------------------
 
-exports.logout = (req, res) => {
+exports.logout = (_, res) => {
   res.clearCookie('refreshToken');
   res.clearCookie('accessToken');
   return res.status(200).json({
@@ -277,11 +296,11 @@ exports.checkId = async (req, res, next) => {
 };
 
 // Controllers
-exports.getQuotes = (req, res) => {
+exports.getQuotes = (_, res) => {
   res.json(res.paginatedResults);
 };
 
-exports.getMyQuotes = async (req, res, next) => {
+exports.getMyQuotes = async (req, res) => {
   try {
     const myQuote = await getQuotesFun(req.id);
 
@@ -293,7 +312,6 @@ exports.getMyQuotes = async (req, res, next) => {
 
     res.status(200).json({
       status: 'success',
-      id: req.id,
       yourQuotes: myQuote,
     });
   } catch (err) {
@@ -308,6 +326,7 @@ exports.getQuotesOfTheUser = async (req, res, next) => {
   try {
     const { userID: id } = req.body;
     const myQuote = await getQuotesFun(id);
+
     res.status(200).json({
       status: 'success',
       id,
@@ -326,19 +345,14 @@ exports.getQuotesOfTheUser = async (req, res, next) => {
 exports.postQuote = async (req, res) => {
   const data = req.body;
 
-  const updated = await con.query_prom(
+  await con.query_prom(
     `INSERT INTO Quotes (Quote, Author, Owner) VALUES (?,?,?)`,
-    [data.Quote, data.Author, data.Owner]
+    [data.Quote, data.Author, req.id]
   );
 
   res.status(201).json({
     status: 'success',
-    data: {
-      information: {
-        updated,
-      },
-      message: 'Your Quote has been posted!',
-    },
+    message: 'Your Quote has been posted!',
   });
 };
 
@@ -384,6 +398,7 @@ exports.protect = async (req, res, next) => {
         message: 'You are not logged in! Please log in to get access.',
       });
     }
+
     // verify token
     const { id } = jwt.verify(req.cookies.accessToken, process.env.SECRET);
     req.id = id;
@@ -403,7 +418,7 @@ exports.protect = async (req, res, next) => {
   next();
 };
 
-exports.forgotPassword = async (req, res, next) => {
+exports.forgotPassword = async (req, res) => {
   // 1. get user based on POSTED emails
   const resultVal = await con.query_prom(
     'SELECT Email, Password, salt FROM users WHERE Email=?',
@@ -420,7 +435,7 @@ exports.forgotPassword = async (req, res, next) => {
   }
   if (
     !filterResults ||
-    (await comparePassword(
+    (await passwordDoesNotMatch(
       req.body.Password,
       filterResults.Password,
       filterResults.salt
@@ -436,12 +451,13 @@ exports.forgotPassword = async (req, res, next) => {
   const [resetToken, passwordResetToken, passwordResetExpires] =
     await createResetPasswordToken(filterResults.Email);
 
-  console.log(resetToken, passwordResetToken, passwordResetExpires);
+  // console.log(resetToken, passwordResetToken, passwordResetExpires);
 
   // 3. send it to user's email
   const resetURL = `${req.protocol}://${req.get(
     'host'
   )}/resetPassword/${resetToken}`;
+
   const message = `Forgot your password? Send a request to with your new password and confirmPassword to:${resetURL}.\nIf you didn't forgot your password, then ignore this email`;
 
   try {
@@ -460,6 +476,7 @@ exports.forgotPassword = async (req, res, next) => {
     );
   } catch (err) {
     if (err) console.log(err);
+
     return res.status(500).json({
       status: 'Internal server error',
       message: 'There was an error sending the email. Try again later!',
@@ -467,31 +484,13 @@ exports.forgotPassword = async (req, res, next) => {
   }
 };
 
-const createResetPasswordToken = async function (Email) {
-  const resetToken = crypto.randomBytes(32).toString('hex');
-  const passwordResetToken = crypto
-    .createHash('sha256')
-    .update(resetToken)
-    .digest('hex');
-
-  const passwordResetExpires = new Date(Date.now() + 10 * 60 * 1000);
-
-  await con.query_prom(
-    'UPDATE users SET passwordResetToken=?, passwordResetExpires=? WHERE Email=?',
-    [passwordResetToken, passwordResetExpires, Email]
-  );
-
-  return [resetToken, passwordResetToken, passwordResetExpires];
-};
-
-exports.resetPassword = async (req, res, next) => {
+exports.resetPassword = async (req, res) => {
   const hashedToken = crypto
     .createHash('sha256')
     .update(req.params.token)
     .digest('hex');
 
   // 1. Getting user based on tokens
-
   const resultVal = await con.query_prom(
     'SELECT userID, passwordResetExpires, Password, salt FROM users WHERE passwordResetToken=?',
     [hashedToken]
@@ -516,6 +515,7 @@ exports.resetPassword = async (req, res, next) => {
       message: 'Password does not match. Please try again!',
     });
   }
+
   if (hashed === filterResults.Password) {
     // if the new password is the same as old one
     return res.status(400).json({
