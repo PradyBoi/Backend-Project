@@ -4,9 +4,10 @@ const bcrypt = require('bcrypt');
 const con = require('./../db_connection.js');
 const sendEmail = require('./../email');
 
-const signToken = (id) => {
+const signToken = (id, expireTime = '30000') => {
+  console.log(expireTime);
   return jwt.sign({ id: id }, process.env.SECRET, {
-    expiresIn: '30000',
+    expiresIn: expireTime,
   });
 };
 
@@ -58,23 +59,6 @@ const strongPassword = async (password, passwordConfirm) => {
   if (!/[A-Z]/.test(password) || !/[a-z]/.test(password)) {
     return 'Password must contain 1 UpperCase and 1 LowerCase character';
   }
-};
-
-const createResetPasswordToken = async function (Email) {
-  const resetToken = crypto.randomBytes(32).toString('hex');
-  const passwordResetToken = crypto
-    .createHash('sha256')
-    .update(resetToken)
-    .digest('hex');
-
-  const passwordResetExpires = new Date(Date.now() + 10 * 60 * 1000);
-
-  await con.query_prom(
-    'UPDATE users SET passwordResetToken=?, passwordResetExpires=? WHERE Email=?',
-    [passwordResetToken, passwordResetExpires, Email]
-  );
-
-  return [resetToken, passwordResetToken, passwordResetExpires];
 };
 
 exports.refreshToken = (req, res) => {
@@ -421,7 +405,7 @@ exports.protect = async (req, res, next) => {
 exports.forgotPassword = async (req, res) => {
   // 1. get user based on POSTED emails
   const resultVal = await con.query_prom(
-    'SELECT Email, Password, salt FROM users WHERE Email=?',
+    'SELECT Email, Password, userID, salt FROM users WHERE Email=?',
     [req.body.Email]
   );
 
@@ -447,11 +431,9 @@ exports.forgotPassword = async (req, res) => {
     });
   }
 
-  // 2. generate random reset tokens
-  const [resetToken, passwordResetToken, passwordResetExpires] =
-    await createResetPasswordToken(filterResults.Email);
+  const resetToken = signToken(filterResults.userID, `${10 * 60 * 1000}`);
 
-  // console.log(resetToken, passwordResetToken, passwordResetExpires);
+  console.log(resetToken);
 
   // 3. send it to user's email
   const resetURL = `${req.protocol}://${req.get(
@@ -470,10 +452,6 @@ exports.forgotPassword = async (req, res) => {
       status: 'success',
       message: 'Token sent to email!',
     });
-    await con.query_prom(
-      'UPDATE users SET passwordResetToken=?, passwordResetExpires=? WHERE Email=?',
-      [passwordResetToken, passwordResetExpires, filterResults.Email]
-    );
   } catch (err) {
     if (err) console.log(err);
 
@@ -485,85 +463,63 @@ exports.forgotPassword = async (req, res) => {
 };
 
 exports.resetPassword = async (req, res) => {
-  const hashedToken = crypto
-    .createHash('sha256')
-    .update(req.params.token)
-    .digest('hex');
+  try {
+    const resetToken = req.params.token;
 
-  // 1. Getting user based on tokens
-  const resultVal = await con.query_prom(
-    'SELECT userID, passwordResetExpires, Password, salt FROM users WHERE passwordResetToken=?',
-    [hashedToken]
-  );
+    // NOT WORKING [CHECK]
+    if (!resetToken) {
+      return res.status(401).json({
+        status: 'fail',
+        message: 'Please provide a token to reset your password.',
+      });
+    }
 
-  const [filterResults] = JSON.parse(JSON.stringify(resultVal));
+    const { id } = jwt.verify(resetToken, process.env.SECRET);
 
-  // 1.) If the token DOES NOT exists in DB
-  if (!filterResults) {
-    return res.status(400).json({
-      status: 'fail',
-      message: 'Invalid or expired token. Please try again!',
+    if (!req.body.Password || !req.body.PasswordConfirm) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Please provide a password, and confirm the password.',
+      });
+    }
+
+    const [{ Email, Password, salt }] = await con.query_prom(
+      'SELECT Email, Password, salt FROM users WHERE userID=?',
+      [id]
+    );
+
+    if (!(await passwordDoesNotMatch(req.body.Password, Password, salt))) {
+      return res.status(400).json({
+        status: 'fail',
+        message:
+          'Old password matches with the new password. Please try enter a new unique password!',
+      });
+    }
+
+    if (req.body.Password !== req.body.PasswordConfirm) {
+      return res.status(400).json({
+        status: 'fail',
+        message: 'Password does not match! Please try again.',
+      });
+    }
+
+    await storeHasedPassword(Email, req.body.Password);
+
+    return res.status(200).json({
+      status: 'success',
+      message: 'Password updated successfully!',
     });
+  } catch (err) {
+    if (err) console.log(err.message);
+    if (err.name === 'TokenExpiredError')
+      return res.status(401).json({
+        status: 'fail',
+        message: 'Your token has expired!. Please try logging in again.',
+      });
+    if (err.name === 'JsonWebTokenError')
+      return res.status(401).json({
+        status: 'fail',
+        message: 'Invalid token! Please try logging in again.',
+      });
   }
-
-  const hashed = await bcrypt.hash(req.body.Password, filterResults.salt);
-  const date = new Date(filterResults.passwordResetExpires);
-
-  if (req.body.Password !== req.body.PasswordConfirm) {
-    return res.status(400).json({
-      status: 'fail',
-      message: 'Password does not match. Please try again!',
-    });
-  }
-
-  if (hashed === filterResults.Password) {
-    // if the new password is the same as old one
-    return res.status(400).json({
-      status: 'fail',
-      message:
-        'Old password matches with the new password. Please try enter a new unique password!',
-    });
-  }
-
-  const string = await strongPassword(
-    req.body.Password,
-    req.body.PasswordConfirm
-  );
-  if (string) {
-    return res.status(400).json({
-      status: 'fail',
-      message: string,
-    });
-  }
-
-  // 2. If token has not expired, and user exists, then set new password
-  if (!(date.getTime() > Date.now())) {
-    return res.status(400).json({
-      status: 'fail',
-      message: 'Token is invalid or expired (date)',
-    });
-  }
-
-  // 3. Update changedPasswordAt property for the user
-  const salt = await bcrypt.genSalt();
-  const hashedPassword = await bcrypt.hash(req.body.Password, salt);
-
-  const queryPro1 = con.query_prom(
-    'UPDATE users SET Password=?, salt=?, passwordResetToken=?, passwordResetExpires=? WHERE passwordResetToken=?',
-    [hashedPassword, salt, null, null, hashedToken]
-  );
-
-  const queryPro2 = con.query_prom(
-    'UPDATE users SET requestCounter=?, requestCounterExpires=? WHERE userID=?',
-    [null, null, filterResults.userID]
-  );
-
-  await Promise.all([queryPro1, queryPro2]);
-
-  // 4. Log in the user, send JWT token
-  const jwtToken = signToken(filterResults.userID);
-  res.cookie(jwtToken);
-  res.status(200).json({
-    status: 'success',
-  });
 };
