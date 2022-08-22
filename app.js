@@ -9,7 +9,6 @@ app.use(express.json());
 app.use(cookieParser());
 
 // AuthRouter and QuotesRouter
-app.use('/', authRouter);
-app.use('/', quotesRouter);
+app.use(authRouter, quotesRouter);
 
 module.exports = app;
